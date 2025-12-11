@@ -1,0 +1,12 @@
+#BSUB -J wave_256_4mpi_1omp
+#BSUB -W 00:15
+#BSUB -o "run_256_4_1.%J.out"
+#BSUB -e "run_256_4_1.%J.err"
+#BSUB -n 4
+#BSUB -R "span[ptile=2]"
+#BSUB -R "affinity[core(1)]"
+#BSUB -x
+
+export OMP_NUM_THREADS=1
+
+mpiexec ./wave_hybrid 256 100

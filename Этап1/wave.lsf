@@ -1,0 +1,226 @@
+#!/bin/bash
+#BSUB -J wave_omp_spread_test  # --- 修改了任務名稱 ---
+#BSUB -W 3:00
+#BSUB -q normal
+#BSUB -o wave_omp_spread.%J.out # --- 修改了輸出檔案名 ---
+#BSUB -e wave_omp_spread.%J.err # --- 修改了錯誤檔案名 ---
+#BSUB -m "polus-c4-ib"
+#BSUB -x
+
+# OpenMP Performance Test with adaptive binding strategy
+# <20 threads: OMP_PLACES=cores, >=20 threads: OMP_PLACES=threads
+
+echo "======================================================"
+echo "OpenMP Performance Test - 3D Wave Solver (Full)"
+echo "======================================================"
+echo "Date: $(date)"
+echo "Hostname: $(hostname)"
+echo ""
+
+# Power8 SMT-2设置 (每个物理核心2个硬件线程)
+export XLSMPOPTS="parthds=2"
+
+# OpenMP绑定策略设置为spread
+export OMP_PROC_BIND=spread
+# 注意: OMP_PLACES 将在循环中根据线程数动态设置
+
+# 关闭动态线程调整
+export OMP_DYNAMIC=FALSE
+
+# --- 新增：設定問題大小 N ---
+export PROBLEM_N=128
+export PROBLEM_K=20 
+
+# 测试的线程数数组
+THREAD_COUNTS=(1 2 4 6 8 12 16 32 40)
+
+# 结果输出文件
+RESULT_FILE="wave_omp_adaptive_results.txt" # --- 修改 ---
+DETAIL_FILE="wave_omp_adaptive_details.txt" # --- 修改 ---
+
+# 清空或创建输出文件
+> $RESULT_FILE
+> $DETAIL_FILE
+
+# 写入测试配置信息
+echo "=== Test Configuration ===" >> $RESULT_FILE
+echo "Node: $(hostname)" >> $RESULT_FILE
+echo "Date: $(date)" >> $RESULT_FILE
+echo "Problem Size (N): $PROBLEM_N" >> $RESULT_FILE
+echo "Binding Strategy: SPREAD (Adaptive PLACES)" >> $RESULT_FILE
+echo "PLACES Policy: <20 threads=cores, >=20 threads=threads" >> $RESULT_FILE
+echo "SMT Level: 2 (Power8)" >> $RESULT_FILE
+echo "" >> $RESULT_FILE
+
+# 显示硬件信息
+echo "=== CPU Information ===" >> $DETAIL_FILE
+lscpu >> $DETAIL_FILE 2>&1
+echo "" >> $DETAIL_FILE
+echo "=== NUMA Configuration ===" >> $DETAIL_FILE
+numactl --hardware >> $DETAIL_FILE 2>&1 || echo "numactl not available" >> $DETAIL_FILE
+echo "" >> $DETAIL_FILE
+
+# --- 修改：創建新的結果表頭 ---
+printf "%-8s| %-4s| %-12s| %-18s| %-12s| %s\n" \
+"Threads" "Run" "Time(s)" "MaxAbsError" "PLACES" "Status" >> $RESULT_FILE
+echo "--------|-----|--------------|--------------------|-------------|--------" >> $RESULT_FILE
+
+# 主测试循环
+for threads in "${THREAD_COUNTS[@]}"
+do
+
+    if [ $threads -lt 20 ]; then
+        export OMP_PLACES=cores
+        PLACES_SETTING="cores"
+    else
+        export OMP_PLACES=threads
+        PLACES_SETTING="threads"
+    fi
+    
+    echo ""
+    echo "Testing with $threads threads (SPREAD binding, PLACES=$PLACES_SETTING, N=$PROBLEM_N)"
+    echo "=========================================================================="
+    
+    export OMP_NUM_THREADS=$threads
+    
+    echo "" >> $DETAIL_FILE
+    echo "=== Testing with $threads threads (OMP_PLACES=$PLACES_SETTING, N=$PROBLEM_N) ===" >> $DETAIL_FILE
+    
+    export OMP_DISPLAY_AFFINITY=TRUE
+    
+    for run in 1 2 3
+    do
+        echo "  Run $run of 3..."
+        
+        TEMP_OUT="/tmp/omp_temp_${threads}_${run}.out"
+        
+  
+        EXECUTABLE_NAME="./Wave"
+        
+        if [ $run -eq 1 ]; then
+
+            $EXECUTABLE_NAME $PROBLEM_N $PROBLEM_K $threads > $TEMP_OUT 2>&1
+        else
+            OMP_DISPLAY_AFFINITY=FALSE $EXECUTABLE_NAME $PROBLEM_N $PROBLEM_K $threads > $TEMP_OUT 2>&1
+        fi
+        
+        
+        # 提取 Time(s)
+        EXEC_TIME=$(grep -F "[Result] Time(s)=" $TEMP_OUT | tail -1 | awk -F'[=,]' '{print $2}')
+        [ -z "$EXEC_TIME" ] && EXEC_TIME="N/A"
+
+        # 提取 MaxAbsError
+        MAX_ABS_ERROR=$(grep "MaxAbsError=" $TEMP_OUT | tail -1 | awk -F'=' '{print $3}')
+        [ -z "$MAX_ABS_ERROR" ] && MAX_ABS_ERROR="N/A"
+
+        # 檢查狀態 
+        if [ "$MAX_ABS_ERROR" == "N/A" ] || [ "$EXEC_TIME" == "N/A" ]; then 
+            STATUS="Failed"
+        else 
+            STATUS="Success"
+        fi
+        
+        # --- 修改：写入新的结果 ---
+        printf "%-8s| %-4s| %-12s| %-18s| %-12s| %s\n" \
+               $threads $run "$EXEC_TIME" "$MAX_ABS_ERROR" "$PLACES_SETTING" "$STATUS" >> $RESULT_FILE
+         
+        cat $TEMP_OUT >> $DETAIL_FILE
+        rm -f $TEMP_OUT
+        
+        # --- 修改：更新日誌輸出 ---
+        echo "    Time: ${EXEC_TIME} s, MaxAbsError: ${MAX_ABS_ERROR}"
+    done
+    
+    export OMP_DISPLAY_AFFINITY=FALSE
+done
+
+echo ""
+echo "=========================================="
+echo "Performance Summary Tables"
+echo "=========================================="
+
+# --- 汇总函数 (無需修改) ---
+summarize_performance() {
+    local title=$1
+    local column=$2
+    local precision=$3
+
+    echo "" >> $RESULT_FILE
+    echo "=== Average Performance ($title) ===" >> $RESULT_FILE
+    printf "%-8s| %-16s| %-16s| %-16s| %-12s\n" "Threads" "Avg $title" "Min $title" "Max $title" "PLACES" >> $RESULT_FILE
+    echo "--------|------------------|------------------|------------------|-------------" >> $RESULT_FILE
+
+    for threads in "${THREAD_COUNTS[@]}"
+    do
+        # 确定此线程数使用的 PLACES 设置
+        if [ $threads -lt 20 ]; then
+            PLACES_USED="cores"
+        else
+            PLACES_USED="threads"
+        fi
+        
+        VALUES=$(awk -F'|' -v th="$threads" -v col="$column" '$1 ~ "^"th"[[:space:]]*$" && NF>=5 {print $col}' $RESULT_FILE | tr -d ' ' | grep -v "N/A")
+        
+        if [ ! -z "$VALUES" ]; then
+            AVG=$(echo "$VALUES" | awk -v p=$precision '{sum+=$1; count++} END {if(count>0) printf "%."p"f", sum/count}')
+            MIN=$(echo "$VALUES" | sort -n | head -1)
+            MAX=$(echo "$VALUES" | sort -n | tail -1)
+            printf "%-8s| %-16s| %-16s| %-16s| %-12s\n" $threads "$AVG" "$MIN" "$MAX" "$PLACES_USED" >> $RESULT_FILE
+        fi
+   
+    done
+}
+
+# --- 修改：生成新的性能汇总 ---
+summarize_performance "Time(s)" 3 4        # 第 3 欄, 4 位小數
+summarize_performance "MaxAbsError" 4 12 # 第 4 欄, 12 位小數
+
+
+# --- 計算加速比 (Accelerator) (基於時間) ---
+echo "" >> $RESULT_FILE
+echo "=== Speedup Analysis (Based on Time) ===" >> $RESULT_FILE
+
+# --- 修改：使用 %.4f 抓取浮點數時間 ---
+SINGLE_TIME=$(grep "^1[[:space:]]*|" $RESULT_FILE | awk -F'|' '{print $3}' | tr -d ' ' | grep -v "N/A" | awk '{sum+=$1; count++} END {if(count>0) printf "%.4f", sum/count}')
+
+if [ ! -z "$SINGLE_TIME" ] && [ $(echo "$SINGLE_TIME > 0" | bc) -eq 1 ]; then
+    echo "Single thread time: ${SINGLE_TIME} s" >> $RESULT_FILE
+    echo "" >> $RESULT_FILE
+    echo "Threads | Speedup | Efficiency(%) | PLACES" >> $RESULT_FILE
+    echo "--------|---------|---------------|-------------" >> $RESULT_FILE
+    
+    for threads in "${THREAD_COUNTS[@]}"
+    do
+        # 确定此线程数使用的 PLACES 设置
+        if [ $threads -lt 20 ]; then
+            PLACES_USED="cores"
+        else
+            PLACES_USED="threads"
+        fi
+        
+        # --- 修改：使用 %.4f 抓取浮點數時間 ---
+        AVG_TIME=$(grep -E "^${threads}[[:space:]]+\|" $RESULT_FILE | awk -F'|' '{print $3}' | tr -d ' ' | grep -v "N/A" | awk '{sum+=$1; count++} END {if(count>0) printf "%.4f", sum/count}')
+        
+        if [ ! -z "$AVG_TIME" ] && [ $(echo "$AVG_TIME > 0" | bc) -eq 1 ]; then
+            SPEEDUP=$(echo "scale=2; $SINGLE_TIME / $AVG_TIME" | bc)
+            EFFICIENCY=$(echo "scale=2; ($SPEEDUP / $threads) * 100" | bc)
+            printf "%-8d| %-8s| %-13.2f| %-12s\n" $threads "$SPEEDUP" "$EFFICIENCY" "$PLACES_USED" >> $RESULT_FILE
+        fi
+    done
+fi
+
+echo "" >> $RESULT_FILE
+echo "Test completed at: $(date)" >> $RESULT_FILE
+
+# --- 完成信息 ---
+echo ""
+echo "=========================================="
+echo "Test Completed!"
+echo "Results saved to: $RESULT_FILE"
+echo "Details saved to: $DETAIL_FILE"
+echo "=========================================="
+
+# --- 显示简要结果 ---
+echo ""
+echo "Brief Results (Summaries):"
+grep -A $((${#THREAD_COUNTS[@]} + 4)) "Average Performance" "$RESULT_FILE"

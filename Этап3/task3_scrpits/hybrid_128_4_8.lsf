@@ -1,0 +1,12 @@
+#BSUB -J wave_128_4mpi_8omp
+#BSUB -W 00:15
+#BSUB -o "run_128_4_8.%J.out"
+#BSUB -e "run_128_4_8.%J.err"
+#BSUB -n 4 
+#BSUB -R "span[ptile=2]"
+#BSUB -R "affinity[core(8)]"
+#BSUB -x
+
+export OMP_NUM_THREADS=8
+
+mpiexec ./wave_hybrid 128 200
